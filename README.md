@@ -53,7 +53,7 @@ Deviantd getinfo
 Also, if you want to check/start/stop **Deviant** , run one of the following commands as **root**:
 
 ```
-DEVIANT_USER=escrow  #replace escrow with the MN username you want to check  
+DEVIANT_USER=deviant  #replace deviant with the MN username you want to check  
   
 systemctl status $DEVIANT_USER #To check the service is running.  
 systemctl start $DEVIANT_USER #To start Deviant service.  
