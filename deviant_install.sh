@@ -221,6 +221,17 @@ maxconnections=256
 masternode=1
 masternodeaddr=$NODEIP:$DEVIANTPORT
 masternodeprivkey=$DEVIANTKEY
+addnode=165.227.83.233:7118
+addnode=104.131.124.189:7118
+addnode=139.59.72.56:7118
+addnode=128.199.201.170:7118
+addnode=165.227.156.13:7118
+addnode=165.227.231.58:7118
+addnode=159.89.152.81:7118
+addnode=5.189.166.116:7118
+addnode=173.249.27.157:7118
+addnode=173.249.27.158:7118
+addnode=173.249.27.159:7118
 EOF
   chown -R $DEVIANTUSER: $DEVIANTFOLDER >/dev/null
 }
