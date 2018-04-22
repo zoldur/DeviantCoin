@@ -1,11 +1,17 @@
 #!/bin/bash
 
 TMP_FOLDER=$(mktemp -d)
-CONFIG_FILE="Deviant.conf"
-DEVIANT_DAEMON="/usr/local/bin/Deviantd"
-DEVIANT_REPO="https://github.com/Deviantcoin/Wallet/raw/master/Deviantcoin%20(Linux)/Deviantd"
-DEFAULTDEVIANTPORT=7118
-DEFAULTDEVIANTUSER="deviant"
+CONFIG_FILE='Deviant.conf'
+CONFIGFOLDER='/root/.Deviant'
+COIN_DAEMON='Deviantd'
+COIN_CLI='Deviantd'
+COIN_PATH='/usr/local/bin/'
+COIN_TGZ='https://github.com/Deviantcoin/Wallet/raw/master/Deviantcoin%20(Linux)/Deviantd'
+COIN_ZIP=$(echo $COIN_TGZ | awk -F'/' '{print $NF}')
+COIN_NAME='Deviant'
+COIN_PORT=7118
+#RPC_PORT=7119
+
 NODEIP=$(curl -s4 icanhazip.com)
 
 
@@ -14,10 +20,161 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 
 
+function download_node() {
+  echo -e "Prepare to download ${GREEN}$COIN_NAME${NC}."
+  cd $TMP_FOLDER >/dev/null 2>&1
+  wget -q $COIN_TGZ
+  compile_error
+  chmod +x $COIN_DAEMON
+  cp $COIN_DAEMON $COIN_PATH
+  cd ~ >/dev/null 2>&1
+  rm -rf $TMP_FOLDER >/dev/null 2>&1
+  clear
+}
+
+
+function configure_systemd() {
+  cat << EOF > /etc/systemd/system/$COIN_NAME.service
+[Unit]
+Description=$COIN_NAME service
+After=network.target
+
+[Service]
+User=root
+Group=root
+
+Type=forking
+#PIDFile=$CONFIGFOLDER/$COIN_NAME.pid
+
+ExecStart=$COIN_PATH$COIN_DAEMON -daemon -conf=$CONFIGFOLDER/$CONFIG_FILE -datadir=$CONFIGFOLDER
+ExecStop=-$COIN_PATH$COIN_CLI -conf=$CONFIGFOLDER/$CONFIG_FILE -datadir=$CONFIGFOLDER stop
+
+Restart=always
+PrivateTmp=true
+TimeoutStopSec=60s
+TimeoutStartSec=10s
+StartLimitInterval=120s
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  sleep 3
+  systemctl start $COIN_NAME.service
+  systemctl enable $COIN_NAME.service >/dev/null 2>&1
+
+  if [[ -z "$(ps axo cmd:100 | egrep $COIN_DAEMON)" ]]; then
+    echo -e "${RED}$COIN_NAME is not running${NC}, please investigate. You should start by running the following commands as root:"
+    echo -e "${GREEN}systemctl start $COIN_NAME.service"
+    echo -e "systemctl status $COIN_NAME.service"
+    echo -e "less /var/log/syslog${NC}"
+    exit 1
+  fi
+}
+
+
+function create_config() {
+  mkdir $CONFIGFOLDER >/dev/null 2>&1
+  RPCUSER=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w10 | head -n1)
+  RPCPASSWORD=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w22 | head -n1)
+  cat << EOF > $CONFIGFOLDER/$CONFIG_FILE
+rpcuser=$RPCUSER
+rpcpassword=$RPCPASSWORD
+#rpcport=$RPC_PORT
+rpcallowip=127.0.0.1
+listen=1
+server=1
+daemon=1
+port=$COIN_PORT
+EOF
+}
+
+function create_key() {
+  echo -e "Enter your ${RED}$COIN_NAME Masternode Private Key${NC}. Leave it blank to generate a new ${RED}Masternode Private Key${NC} for you:"
+  read -t 5 -e COINKEY
+  if [[ -z "$COINKEY" ]]; then
+  $COIN_PATH$COIN_DAEMON -daemon
+  sleep 30
+  if [ -z "$(ps axo cmd:100 | grep $COIN_DAEMON)" ]; then
+   echo -e "${RED}$COIN_NAME server couldn not start. Check /var/log/syslog for errors.{$NC}"
+   exit 1
+  fi
+  COINKEY=$($COIN_PATH$COIN_CLI masternode genkey)
+  if [ "$?" -gt "0" ];
+    then
+    echo -e "${RED}Wallet not fully loaded. Let us wait and try again to generate the Private Key${NC}"
+    sleep 30
+    COINKEY=$($COIN_PATH$COIN_CLI masternode genkey)
+  fi
+  $COIN_PATH$COIN_CLI stop
+fi
+clear
+}
+
+function update_config() {
+  sed -i 's/daemon=1/daemon=0/' $CONFIGFOLDER/$CONFIG_FILE
+  cat << EOF >> $CONFIGFOLDER/$CONFIG_FILE
+logintimestamps=1
+maxconnections=256
+#bind=$NODEIP
+masternode=1
+externalip=$NODEIP:$COIN_PORT
+masternodeprivkey=$COINKEY
+addnode=165.227.83.233:7118
+addnode=104.131.124.189:7118
+addnode=139.59.72.56:7118
+addnode=128.199.201.170:7118
+addnode=165.227.156.13:7118
+addnode=165.227.231.58:7118
+addnode=159.89.152.81:7118
+addnode=5.189.166.116:7118
+addnode=173.249.27.157:7118
+addnode=173.249.27.158:7118
+addnode=173.249.27.159:7118
+EOF
+}
+
+
+function enable_firewall() {
+  echo -e "Installing and setting up firewall to allow ingress on port ${GREEN}$COIN_PORT${NC}"
+  ufw allow $COIN_PORT/tcp comment "$COIN_NAME MN port" >/dev/null
+  ufw allow ssh comment "SSH" >/dev/null 2>&1
+  ufw limit ssh/tcp >/dev/null 2>&1
+  ufw default allow outgoing >/dev/null 2>&1
+  echo "y" | ufw enable >/dev/null 2>&1
+}
+
+
+function get_ip() {
+  declare -a NODE_IPS
+  for ips in $(netstat -i | awk '!/Kernel|Iface|lo/ {print $1," "}')
+  do
+    NODE_IPS+=($(curl --interface $ips --connect-timeout 2 -s4 icanhazip.com))
+  done
+
+  if [ ${#NODE_IPS[@]} -gt 1 ]
+    then
+      echo -e "${GREEN}More than one IP. Please type 0 to use the first IP, 1 for the second and so on...${NC}"
+      INDEX=0
+      for ip in "${NODE_IPS[@]}"
+      do
+        echo ${INDEX} $ip
+        let INDEX=${INDEX}+1
+      done
+      read -e choose_ip
+      NODEIP=${NODE_IPS[$choose_ip]}
+  else
+    NODEIP=${NODE_IPS[0]}
+  fi
+}
+
+
 function compile_error() {
 if [ "$?" -gt "0" ];
  then
-  echo -e "${RED}Failed to compile $@. Please investigate.${NC}"
+  echo -e "${RED}Failed to compile $COIN_NAME. Please investigate.${NC}"
   exit 1
 fi
 }
@@ -34,19 +191,14 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-if [ -n "$(pidof $DEVIANT_DAEMON)" ] || [ -e "$DEVIANT_DAEMOM" ] ; then
-  echo -e "${GREEN}\c"
-  read -e -p "Deviant is already installed. Do you want to add another MN? [Y/N]" NEW_DEVIANT
-  echo -e "{NC}"
-  clear
-else
-  NEW_DEVIANT="new"
+if [ -n "$(pidof $COIN_DAEMON)" ] || [ -e "$COIN_DAEMOM" ] ; then
+  echo -e "${RED}$COIN_NAME is already installed.${NC}"
+  exit 1
 fi
 }
 
 function prepare_system() {
-
-echo -e "Prepare the system to install Deviant master node."
+echo -e "Prepare the system to install ${GREEN}$COIN_NAME${NC} master node."
 apt-get update >/dev/null 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get update > /dev/null 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y -qq upgrade >/dev/null 2>&1
@@ -57,9 +209,8 @@ echo -e "Installing required packages, it may take some time to finish.${NC}"
 apt-get update >/dev/null 2>&1
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" make software-properties-common \
 build-essential libtool autoconf libssl-dev libboost-dev libboost-chrono-dev libboost-filesystem-dev libboost-program-options-dev \
-libboost-system-dev libboost-test-dev libboost-thread-dev sudo automake git wget pwgen curl libdb4.8-dev bsdmainutils libdb4.8++-dev \
-libminiupnpc-dev libgmp3-dev ufw fail2ban >/dev/null 2>&1
-clear
+libboost-system-dev libboost-test-dev libboost-thread-dev sudo automake git wget curl libdb4.8-dev bsdmainutils libdb4.8++-dev \
+libminiupnpc-dev libgmp3-dev ufw pkg-config libevent-dev  libdb5.3++ unzip libzmq5 >/dev/null 2>&1
 if [ "$?" -gt "0" ];
   then
     echo -e "${RED}Not all required packages were installed properly. Try to install them manually by running the following commands:${NC}\n"
@@ -68,197 +219,38 @@ if [ "$?" -gt "0" ];
     echo "apt-add-repository -y ppa:bitcoin/bitcoin"
     echo "apt-get update"
     echo "apt install -y make build-essential libtool software-properties-common autoconf libssl-dev libboost-dev libboost-chrono-dev libboost-filesystem-dev \
-libboost-program-options-dev libboost-system-dev libboost-test-dev libboost-thread-dev sudo automake git pwgen curl libdb4.8-dev \
-bsdmainutils libdb4.8++-dev libminiupnpc-dev libgmp3-dev"
+libboost-program-options-dev libboost-system-dev libboost-test-dev libboost-thread-dev sudo automake git curl libdb4.8-dev \
+bsdmainutils libdb4.8++-dev libminiupnpc-dev libgmp3-dev ufw pkg-config libevent-dev libdb5.3++ unzip libzmq5"
  exit 1
 fi
-
 clear
-echo -e "Checking if swap space is needed."
-PHYMEM=$(free -g|awk '/^Mem:/{print $2}')
-SWAP=$(free -g|awk '/^Swap:/{print $2}')
-if [ "$PHYMEM" -lt "2" ] && [ -n "$SWAP" ]
-  then
-    echo -e "${GREEN}Server is running with less than 2G of RAM without SWAP, creating 2G swap file.${NC}"
-    SWAPFILE=$(mktemp)
-    dd if=/dev/zero of=$SWAPFILE bs=1024 count=2M
-    chmod 600 $SWAPFILE
-    mkswap $SWAPFILE
-    swapon -a $SWAPFILE
-else
-  echo -e "${GREEN}Server running with at least 2G of RAM, no swap needed.${NC}"
-fi
-clear
-}
-
-function compile_deviant() {
-  echo -e "Clone git repo and compile it. This may take some time. Press a key to continue."
-  cd $TMP_FOLDER
-  wget -q $DEVIANT_REPO
-  chmod +x Deviantd
-  cp -a Deviantd /usr/local/bin
-  cd ~
-  rm -rf $TMP_FOLDER
-  clear
-}
-
-function enable_firewall() {
-  echo -e "Installing fail2ban and setting up firewall to allow ingress on port ${GREEN}$DEVIANTPORT${NC}"
-  ufw allow $DEVIANTPORT/tcp comment "Deviant MN port" >/dev/null
-  ufw allow $[DEVIANTPORT+1]/tcp comment "Deviant RPC port" >/dev/null
-  ufw allow ssh comment "SSH" >/dev/null 2>&1
-  ufw limit ssh/tcp >/dev/null 2>&1
-  ufw default allow outgoing >/dev/null 2>&1
-  echo "y" | ufw enable >/dev/null 2>&1
-  systemctl enable fail2ban >/dev/null 2>&1
-  systemctl start fail2ban >/dev/null 2>&1
-}
-
-function systemd_deviant() {
-  cat << EOF > /etc/systemd/system/$DEVIANTUSER.service
-[Unit]
-Description=Deviant service
-After=network.target
-
-[Service]
-ExecStart=$DEVIANT_DAEMON -conf=$DEVIANTFOLDER/$CONFIG_FILE -datadir=$DEVIANTFOLDER
-ExecStop=$DEVIANT_DAEMON -conf=$DEVIANTFOLDER/$CONFIG_FILE -datadir=$DEVIANTFOLDER stop
-Restart=on-abord
-User=$DEVIANTUSER
-Group=$DEVIANTUSER
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reload
-  sleep 3
-  systemctl start $DEVIANTUSER.service
-  systemctl enable $DEVIANTUSER.service
-
-  if [[ -z "$(ps axo user:15,cmd:100 | egrep ^$DEVIANTUSER | grep $DEVIANT_DAEMON)" ]]; then
-    echo -e "${RED}Deviantd is not running${NC}, please investigate. You should start by running the following commands as root:"
-    echo -e "${GREEN}systemctl start $DEVIANTUSER.service"
-    echo -e "systemctl status $DEVIANTUSER.service"
-    echo -e "less /var/log/syslog${NC}"
-    exit 1
-  fi
-}
-
-function ask_port() {
-read -p "DEVIANT Port: " -i $DEFAULTDEVIANTPORT -e DEVIANTPORT
-: ${DEVIANTPORT:=$DEFAULTDEVIANTPORT}
-}
-
-function ask_user() {
-  read -p "Deviant user: " -i $DEFAULTDEVIANTUSER -e DEVIANTUSER
-  : ${DEVIANTUSER:=$DEFAULTDEVIANTUSER}
-
-  if [ -z "$(getent passwd $DEVIANTUSER)" ]; then
-    USERPASS=$(pwgen -s 12 1)
-    useradd -m $DEVIANTUSER
-    echo "$DEVIANTUSER:$USERPASS" | chpasswd
-
-    DEVIANTHOME=$(sudo -H -u $DEVIANTUSER bash -c 'echo $HOME')
-    DEFAULTDEVIANTFOLDER="$DEVIANTHOME/.Deviant"
-    read -p "Configuration folder: " -i $DEFAULTDEVIANTFOLDER -e DEVIANTFOLDER
-    : ${DEVIANTFOLDER:=$DEFAULTDEVIANTFOLDER}
-    mkdir -p $DEVIANTFOLDER
-    chown -R $DEVIANTUSER: $DEVIANTFOLDER >/dev/null
-  else
-    clear
-    echo -e "${RED}User exits. Please enter another username: ${NC}"
-    ask_user
-  fi
-}
-
-function check_port() {
-  declare -a PORTS
-  PORTS=($(netstat -tnlp | awk '/LISTEN/ {print $4}' | awk -F":" '{print $NF}' | sort | uniq | tr '\r\n'  ' '))
-  ask_port
-
-  while [[ ${PORTS[@]} =~ $DEVIANTPORT ]] || [[ ${PORTS[@]} =~ $[DEVIANTPORT+1] ]]; do
-    clear
-    echo -e "${RED}Port in use, please choose another port:${NF}"
-    ask_port
-  done
-}
-
-function create_config() {
-  RPCUSER=$(pwgen -s 8 1)
-  RPCPASSWORD=$(pwgen -s 15 1)
-  cat << EOF > $DEVIANTFOLDER/$CONFIG_FILE
-rpcuser=$RPCUSER
-rpcpassword=$RPCPASSWORD
-rpcallowip=127.0.0.1
-rpcport=$[DEVIANTPORT+1]
-listen=1
-server=1
-daemon=1
-port=$DEVIANTPORT
-EOF
-}
-
-function create_key() {
-  echo -e "Enter your ${RED}Masternode Private Key${NC}. Leave it blank to generate a new ${RED}Masternode Private Key${NC} for you:"
-  read -e DEVIANTKEY
-  if [[ -z "$DEVIANTKEY" ]]; then
-  su $DEVIANTUSER -c "$DEVIANT_DAEMON -conf=$DEVIANTFOLDER/$CONFIG_FILE -datadir=$DEVIANTFOLDER"
-  sleep 5
-  if [ -z "$(ps axo user:15,cmd:100 | egrep ^$DEVIANTUSER | grep $DEVIANT_DAEMON)" ]; then
-   echo -e "${RED}Deviantd server couldn't start. Check /var/log/syslog for errors.{$NC}"
-   exit 1
-  fi
-  DEVIANTKEY=$(su $DEVIANTUSER -c "$DEVIANT_DAEMON -conf=$DEVIANTFOLDER/$CONFIG_FILE -datadir=$DEVIANTFOLDER masternode genkey")
-  su $DEVIANTUSER -c "$DEVIANT_DAEMON -conf=$DEVIANTFOLDER/$CONFIG_FILE -datadir=$DEVIANTFOLDER stop"
-fi
-}
-
-function update_config() {
-  sed -i 's/daemon=1/daemon=0/' $DEVIANTFOLDER/$CONFIG_FILE
-  cat << EOF >> $DEVIANTFOLDER/$CONFIG_FILE
-maxconnections=256
-masternode=1
-masternodeaddr=$NODEIP:$DEVIANTPORT
-masternodeprivkey=$DEVIANTKEY
-addnode=165.227.83.233:7118
-addnode=104.131.124.189:7118
-addnode=139.59.72.56:7118
-addnode=128.199.201.170:7118
-addnode=165.227.156.13:7118
-addnode=165.227.231.58:7118
-addnode=159.89.152.81:7118
-addnode=5.189.166.116:7118
-addnode=173.249.27.157:7118
-addnode=173.249.27.158:7118
-addnode=173.249.27.159:7118
-EOF
-  chown -R $DEVIANTUSER: $DEVIANTFOLDER >/dev/null
 }
 
 function important_information() {
- echo
  echo -e "================================================================================================================================"
- echo -e "Deviant Masternode is up and running as user ${GREEN}$DEVIANTUSER${NC} and it is listening on port ${GREEN}$DEVIANTPORT${NC}."
- echo -e "${GREEN}$DEVIANTUSER${NC} password is ${RED}$USERPASS${NC}"
- echo -e "Configuration file is: ${RED}$DEVIANTFOLDER/$CONFIG_FILE${NC}"
- echo -e "Start: ${RED}systemctl start $DEVIANTUSER.service${NC}"
- echo -e "Stop: ${RED}systemctl stop $DEVIANTUSER.service${NC}"
- echo -e "VPS_IP:PORT ${RED}$NODEIP:$DEVIANTPORT${NC}"
- echo -e "MASTERNODE PRIVATEKEY is: ${RED}$DEVIANTKEY${NC}"
- echo -e "Please check Deviant is running with the following command: ${GREEN}systemctl status $DEVIANTUSER.service${NC}"
+ echo -e "$COIN_NAME Masternode is up and running listening on port ${RED}$COIN_PORT${NC}."
+ echo -e "Configuration file is: ${RED}$CONFIGFOLDER/$CONFIG_FILE${NC}"
+ echo -e "Start: ${RED}systemctl start $COIN_NAME.service${NC}"
+ echo -e "Stop: ${RED}systemctl stop $COIN_NAME.service${NC}"
+ echo -e "VPS_IP:PORT ${RED}$NODEIP:$COIN_PORT${NC}"
+ echo -e "MASTERNODE PRIVATEKEY is: ${RED}$COINKEY${NC}"
+ echo -e "Please check ${RED}$COIN_NAME${NC} daemon is running with the following command: ${RED}systemctl status $COIN_NAME.service${NC}"
+ echo -e "Use ${RED}$COIN_CLI masternode status${NC} to check your MN."
+ if [[ -n $SENTINEL_REPO  ]]; then
+  echo -e "${RED}Sentinel${NC} is installed in ${RED}$CONFIGFOLDER/sentinel${NC}"
+  echo -e "Sentinel logs is: ${RED}$CONFIGFOLDER/sentinel.log${NC}"
+ fi
  echo -e "================================================================================================================================"
 }
 
 function setup_node() {
-  ask_user
-  check_port
+  get_ip
   create_config
   create_key
   update_config
   enable_firewall
-  systemd_deviant
   important_information
+  configure_systemd
 }
 
 
@@ -266,15 +258,7 @@ function setup_node() {
 clear
 
 checks
-if [[ ("$NEW_DEVIANT" == "y" || "$NEW_DEVIANT" == "Y") ]]; then
-  setup_node
-  exit 0
-elif [[ "$NEW_DEVIANT" == "new" ]]; then
-  prepare_system
-  compile_deviant
-  setup_node
-else
-  echo -e "${GREEN}Deviantd already running.${NC}"
-  exit 0
-fi
+prepare_system
+download_node
+setup_node
 
