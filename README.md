@@ -4,7 +4,7 @@ Shell script to install an [Deviant Coin Masternode](http://http://deviantcoin.i
 
 ## Installation:  
 
-wget -q https://raw.githubusercontent.com/zoldur/DeviantCoin/master/deviant_install.sh  
+wget -N https://raw.githubusercontent.com/zoldur/DeviantCoin/master/deviant_install.sh  
 bash deviant_install.sh
 ***
 
@@ -32,8 +32,8 @@ After the MN is up and running, you need to configure the desktop wallet accordi
 
 ## Usage:  
 ```
-Deviantd masternode status  
-Deviantd getinfo  
+deviant-cli masternode status  
+deviant-cli getinfo  
 ```  
 Also, if you want to check/start/stop **Deviant** , run one of the following commands as **root**:
 ```
@@ -48,7 +48,6 @@ systemctl is-enabled DEviant #To check whetether Deviant service is enabled on b
   
 Any donation is highly appreciated  
 
-**DEV**: DAi2q5QtwxmQxhCFs8TpBkcCQ9uWZEZwc3   
 **BTC**: 1BzeQ12m4zYaQKqysGNVbQv1taN7qgS8gY  
 **ETH**: 0x39d10fe57611c564abc255ffd7e984dc97e9bd6d  
 **LTC**: LXrWbfeejNQRmRvtzB6Te8yns93Tu3evGf  
